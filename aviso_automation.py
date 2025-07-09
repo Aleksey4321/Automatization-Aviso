@@ -756,6 +756,67 @@ class AvisoAutomation:
         except Exception as e:
             logging.error(f"✗ Ошибка создания резервной копии: {e}")
     
+    def get_original_ip(self) -> Optional[str]:
+        """Получение оригинального IP без прокси"""
+        try:
+            logging.info("🔍 Проверка оригинального IP (без прокси)...")
+            response = requests.get('https://2ip.ru', timeout=10)
+            if response.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(response.content, 'html.parser')
+                ip_element = soup.select_one('div.ip span')
+                if ip_element:
+                    original_ip = ip_element.text.strip()
+                    logging.info(f"📍 Оригинальный IP: {original_ip}")
+                    return original_ip
+            return None
+        except Exception as e:
+            logging.error(f"❌ Ошибка получения оригинального IP: {e}")
+            return None
+
+    def check_tor_ip_change(self) -> bool:
+        """Проверка реального изменения IP через Tor"""
+        try:
+            # Получаем оригинальный IP
+            original_ip = self.get_original_ip()
+            if not original_ip:
+                logging.error("❌ Не удалось получить оригинальный IP")
+                return False
+            
+            # Проверяем IP через браузер с Tor
+            logging.info("🔍 Проверка IP через Tor браузер...")
+            self.driver.get("https://2ip.ru")
+            
+            # Ждем загрузки элемента с IP
+            wait = WebDriverWait(self.driver, 20)
+            try:
+                ip_element = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.ip span"))
+                )
+                tor_ip = ip_element.text.strip()
+                logging.info(f"📍 IP через Tor: {tor_ip}")
+                
+                # Сравниваем IP адреса
+                if original_ip == tor_ip:
+                    logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: IP НЕ ИЗМЕНИЛСЯ!")
+                    logging.error(f"📍 Оригинальный IP: {original_ip}")
+                    logging.error(f"📍 IP через Tor: {tor_ip}")
+                    logging.error("🛑 Tor прокси НЕ РАБОТАЕТ - останавливаем работу")
+                    return False
+                else:
+                    logging.info(f"✅ IP УСПЕШНО ИЗМЕНЕН!")
+                    logging.info(f"📍 Было: {original_ip}")
+                    logging.info(f"📍 Стало: {tor_ip}")
+                    return True
+                    
+            except Exception as e:
+                logging.error(f"❌ Ошибка получения IP через браузер: {e}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка проверки изменения IP: {e}")
+            return False
+
     def setup_driver(self) -> bool:
         """Настройка и запуск браузера с Tor"""
         logging.info("🌐 Настройка браузера...")
@@ -777,7 +838,7 @@ class AvisoAutomation:
             # Создаем дополнительные аргументы Chrome для SOCKS прокси
             chrome_args = [
                 f"--proxy-server={proxy_string}",  # Явно указываем SOCKS5 прокси
-                "--proxy-bypass-list=<-loopback>",  # Исключаем localhost из прокси
+                "--proxy-bypass-list=",  # Принудительное использование прокси для ВСЕХ соединений
                 "--disable-web-security",
                 "--disable-features=VizDisplayCompositor",
                 "--allow-running-insecure-content",
@@ -846,8 +907,16 @@ class AvisoAutomation:
                 
                 logging.info("✅ Тест 1 ПРОЙДЕН: Базовая загрузка работает")
                 
-                # Тест 2: Проверяем Tor
-                logging.info("📡 Тест 2: Проверка Tor соединения...")
+                # Тест 2: КРИТИЧЕСКАЯ проверка изменения IP
+                logging.info("📡 Тест 2: КРИТИЧЕСКАЯ проверка изменения IP...")
+                if not self.check_tor_ip_change():
+                    logging.error("❌ Тест 2 ПРОВАЛЕН: IP НЕ ИЗМЕНИЛСЯ - Tor прокси НЕ РАБОТАЕТ")
+                    return False
+                
+                logging.info("✅ Тест 2 ПРОЙДЕН: IP успешно изменен через Tor!")
+                
+                # Тест 3: Дополнительная проверка Tor проекта
+                logging.info("📡 Тест 3: Проверка Tor проекта...")
                 self.driver.get("https://check.torproject.org")
                 self.driver.sleep(15)  # Даем больше времени для Tor
                 
@@ -857,41 +926,17 @@ class AvisoAutomation:
                 logging.info(f"📄 Tor заголовок: {tor_title}")
                 logging.info(f"📄 Tor контент размер: {len(tor_content)} символов")
                 
-                if len(tor_content) < 500:
-                    logging.error("❌ Тест 2 ПРОВАЛЕН: Tor страница не загрузилась")
-                    logging.error(f"📋 Tor содержимое: {tor_content[:300]}...")
-                    return False
-                
-                tor_content_lower = tor_content.lower()
-                
-                if "congratulations" in tor_content_lower:
-                    logging.info("✅ Тест 2 ПРОЙДЕН: Tor соединение ПОДТВЕРЖДЕНО!")
-                    return True
-                elif "using tor" in tor_content_lower or "tor browser" in tor_content_lower:
-                    logging.info("✅ Тест 2 ПРОЙДЕН: Tor соединение обнаружено!")
-                    return True
-                elif "tor" in tor_content_lower:
-                    logging.warning("⚠ Тест 2 ЧАСТИЧНО: Tor страница загрузилась, но статус неясен")
-                    logging.debug(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
-                    
-                    # Тест 3: Проверяем IP
-                    logging.info("📡 Тест 3: Проверка IP адреса...")
-                    self.driver.get("https://httpbin.org/ip")
-                    self.driver.sleep(8)
-                    
-                    ip_content = self.driver.get_page_source()
-                    logging.info(f"📍 IP ответ: {ip_content[:200]}...")
-                    
-                    if "origin" in ip_content.lower() and len(ip_content) > 50:
-                        logging.info("✅ Тест 3 ПРОЙДЕН: IP проверка успешна")
-                        return True
+                if len(tor_content) > 500:
+                    tor_content_lower = tor_content.lower()
+                    if "congratulations" in tor_content_lower or "using tor" in tor_content_lower:
+                        logging.info("✅ Тест 3 ПРОЙДЕН: Tor проект подтверждает соединение!")
                     else:
-                        logging.error("❌ Тест 3 ПРОВАЛЕН: IP проверка не прошла")
-                        return False
+                        logging.warning("⚠ Тест 3 ЧАСТИЧНО: Tor проект не подтверждает, но IP изменен")
                 else:
-                    logging.error("❌ Тест 2 ПРОВАЛЕН: Tor соединение НЕ РАБОТАЕТ")
-                    logging.error(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
-                    return False
+                    logging.warning("⚠ Тест 3 ЧАСТИЧНО: Tor проект недоступен, но IP изменен")
+                
+                logging.info("🎉 ВСЕ ТЕСТЫ ПРОЙДЕНЫ: Tor прокси работает корректно!")
+                return True
                     
             except Exception as e:
                 logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА во время проверки соединения: {e}")
