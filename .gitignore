@@ -1,0 +1,20 @@
+# Temporary test files
+test_proxy_setup.py
+verify_proxy_fixes.py
+
+# Log files
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# User agent data
+user_agents.json
+
+# Cookies
+aviso_cookies.pkl
+
+# Backup files
+aviso_automation_v*.py
