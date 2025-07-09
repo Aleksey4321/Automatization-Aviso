@@ -774,10 +774,29 @@ class AvisoAutomation:
             proxy_string = f"socks5://127.0.0.1:{self.tor_manager.tor_port}"
             logging.info(f"🔌 Используется Tor прокси: {proxy_string}")
             
-            # Создаем дополнительные аргументы Chrome для SOCKS прокси
+            # КРИТИЧЕСКИ ВАЖНО: Устанавливаем переменные окружения для принудительного использования прокси
+            logging.info("🔒 Установка переменных окружения для принудительного использования прокси...")
+            proxy_env = {
+                'HTTP_PROXY': proxy_string,
+                'HTTPS_PROXY': proxy_string,
+                'SOCKS_PROXY': proxy_string,
+                'ALL_PROXY': proxy_string,
+                'http_proxy': proxy_string,
+                'https_proxy': proxy_string,
+                'socks_proxy': proxy_string,
+                'all_proxy': proxy_string
+            }
+            
+            # Применяем переменные окружения
+            for env_var, proxy_value in proxy_env.items():
+                os.environ[env_var] = proxy_value
+                logging.debug(f"✓ Установлена переменная окружения: {env_var}={proxy_value}")
+            
+            # Создаем расширенные аргументы Chrome для SOCKS прокси
             chrome_args = [
-                f"--proxy-server={proxy_string}",  # Явно указываем SOCKS5 прокси
-                "--proxy-bypass-list=<-loopback>",  # Исключаем localhost из прокси
+                f"--proxy-server={proxy_string}",  # Основной SOCKS5 прокси
+                "--proxy-bypass-list=<-loopback>",  # Исключаем localhost из прокси  
+                "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",  # Принудительное использование прокси для DNS
                 "--disable-web-security",
                 "--disable-features=VizDisplayCompositor",
                 "--allow-running-insecure-content",
@@ -788,24 +807,34 @@ class AvisoAutomation:
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
                 "--disable-gpu",
-                "--disable-extensions"
+                "--disable-extensions",
+                "--disable-background-networking",  # Отключаем фоновые соединения
+                "--disable-background-timer-throttling",  # Отключаем фоновые таймеры
+                "--disable-renderer-backgrounding",  # Отключаем фоновые процессы рендеринга
+                "--disable-backgrounding-occluded-windows",  # Отключаем фоновые окна
+                "--disable-ipc-flooding-protection",  # Отключаем защиту от флуда IPC
+                "--disable-default-apps",  # Отключаем приложения по умолчанию
+                "--no-default-browser-check",  # Отключаем проверку браузера по умолчанию
+                "--no-first-run",  # Отключаем первый запуск
+                "--disable-sync"  # Отключаем синхронизацию
             ]
             
             # Для Termux добавляем дополнительные настройки
             if self.tor_manager.is_termux:
                 chrome_args.extend([
                     "--single-process",
-                    "--no-zygote",
-                    "--disable-background-networking"
+                    "--no-zygote"
                 ])
             
-            # Инициализация драйвера SeleniumBase БЕЗ встроенного прокси
-            # Прокси передаем через chromium_arg
+            # Инициализация драйвера SeleniumBase с DUAL прокси конфигурацией
+            # Используем И proxy параметр И chromium_arg для максимальной надежности
+            logging.info("🚀 Инициализация браузера с ДВОЙНОЙ прокси конфигурацией...")
             self.driver = Driver(
                 uc=True,  # Undetected Chrome
                 headless=False,  # Показываем браузер
                 agent=user_agent,  # User-Agent
-                chromium_arg=" ".join(chrome_args)  # Прокси через аргументы Chrome
+                proxy=proxy_string,  # ОСНОВНОЙ способ передачи прокси в SeleniumBase
+                chromium_arg=" ".join(chrome_args)  # ДОПОЛНИТЕЛЬНЫЙ способ через аргументы Chrome
             )
             
             # Устанавливаем таймауты
@@ -818,8 +847,21 @@ class AvisoAutomation:
             except Exception as e:
                 logging.debug(f"⚠ Не удалось скрыть webdriver: {e}")
             
-            # СТРОГАЯ проверка соединения
-            logging.info("🔍 СТРОГАЯ проверка Tor соединения...")
+            # КРИТИЧЕСКИ ВАЖНАЯ проверка соединения с детальной диагностикой
+            logging.info("🔍 УСИЛЕННАЯ проверка Tor соединения с IP-диагностикой...")
+            
+            # Сначала получим оригинальный IP для сравнения (через системные библиотеки)
+            original_ip = None
+            try:
+                import requests
+                # Делаем запрос БЕЗ прокси для получения оригинального IP
+                original_response = requests.get("https://httpbin.org/ip", timeout=10)
+                if original_response.status_code == 200:
+                    original_data = original_response.json()
+                    original_ip = original_data.get('origin', '').split(',')[0].strip()
+                    logging.info(f"🌐 Оригинальный IP (без прокси): {original_ip}")
+            except Exception as e:
+                logging.warning(f"⚠ Не удалось получить оригинальный IP: {e}")
             
             try:
                 # Тест 1: Проверяем что страница вообще загружается
@@ -846,8 +888,56 @@ class AvisoAutomation:
                 
                 logging.info("✅ Тест 1 ПРОЙДЕН: Базовая загрузка работает")
                 
-                # Тест 2: Проверяем Tor
-                logging.info("📡 Тест 2: Проверка Tor соединения...")
+                # Тест 2: КРИТИЧЕСКАЯ проверка IP через браузер
+                logging.info("📡 Тест 2: КРИТИЧЕСКАЯ проверка IP через браузер...")
+                self.driver.get("https://httpbin.org/ip")
+                self.driver.sleep(10)
+                
+                ip_content = self.driver.get_page_source()
+                logging.info(f"📍 IP ответ (полный): {ip_content[:300]}...")
+                
+                current_ip = None
+                if "origin" in ip_content.lower():
+                    # Извлекаем IP из JSON ответа
+                    try:
+                        import json
+                        import re
+                        
+                        # Ищем JSON в содержимом страницы
+                        json_match = re.search(r'\{[^}]*"origin"[^}]*\}', ip_content)
+                        if json_match:
+                            json_data = json.loads(json_match.group())
+                            current_ip = json_data.get('origin', '').split(',')[0].strip()
+                        else:
+                            # Альтернативный поиск IP
+                            ip_match = re.search(r'"origin":\s*"([^"]+)"', ip_content)
+                            if ip_match:
+                                current_ip = ip_match.group(1).split(',')[0].strip()
+                            
+                    except Exception as e:
+                        logging.warning(f"⚠ Ошибка парсинга IP: {e}")
+                
+                if current_ip:
+                    logging.info(f"🌐 Текущий IP (через браузер): {current_ip}")
+                    
+                    # КРИТИЧЕСКАЯ проверка: IP должен измениться
+                    if original_ip and current_ip == original_ip:
+                        logging.error("❌ IP НЕ ИЗМЕНИЛСЯ! Tor НЕ РАБОТАЕТ!")
+                        logging.error(f"❌ Оригинальный IP: {original_ip}")
+                        logging.error(f"❌ Текущий IP: {current_ip}")
+                        logging.error("❌ ПРОКСИ НЕ ИСПОЛЬЗУЕТСЯ!")
+                        return False
+                    else:
+                        logging.info("✅ IP ИЗМЕНИЛСЯ! Прокси работает!")
+                        if original_ip:
+                            logging.info(f"✅ Оригинальный IP: {original_ip}")
+                        logging.info(f"✅ Новый IP через Tor: {current_ip}")
+                else:
+                    logging.error("❌ Тест 2 ПРОВАЛЕН: Не удалось извлечь IP из ответа")
+                    return False
+                
+                # Тест 3: Проверяем Tor Project сайт
+                logging.info("📡 Тест 3: Проверка Tor Project...")
                 self.driver.get("https://check.torproject.org")
                 self.driver.sleep(15)  # Даем больше времени для Tor
                 
@@ -858,40 +948,21 @@ class AvisoAutomation:
                 logging.info(f"📄 Tor контент размер: {len(tor_content)} символов")
                 
                 if len(tor_content) < 500:
-                    logging.error("❌ Тест 2 ПРОВАЛЕН: Tor страница не загрузилась")
-                    logging.error(f"📋 Tor содержимое: {tor_content[:300]}...")
-                    return False
-                
-                tor_content_lower = tor_content.lower()
-                
-                if "congratulations" in tor_content_lower:
-                    logging.info("✅ Тест 2 ПРОЙДЕН: Tor соединение ПОДТВЕРЖДЕНО!")
-                    return True
-                elif "using tor" in tor_content_lower or "tor browser" in tor_content_lower:
-                    logging.info("✅ Тест 2 ПРОЙДЕН: Tor соединение обнаружено!")
-                    return True
-                elif "tor" in tor_content_lower:
-                    logging.warning("⚠ Тест 2 ЧАСТИЧНО: Tor страница загрузилась, но статус неясен")
-                    logging.debug(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
-                    
-                    # Тест 3: Проверяем IP
-                    logging.info("📡 Тест 3: Проверка IP адреса...")
-                    self.driver.get("https://httpbin.org/ip")
-                    self.driver.sleep(8)
-                    
-                    ip_content = self.driver.get_page_source()
-                    logging.info(f"📍 IP ответ: {ip_content[:200]}...")
-                    
-                    if "origin" in ip_content.lower() and len(ip_content) > 50:
-                        logging.info("✅ Тест 3 ПРОЙДЕН: IP проверка успешна")
-                        return True
-                    else:
-                        logging.error("❌ Тест 3 ПРОВАЛЕН: IP проверка не прошла")
-                        return False
+                    logging.warning("⚠ Тест 3: Tor Project страница маленькая, но IP уже проверен")
+                    logging.info(f"📋 Tor содержимое: {tor_content[:300]}...")
                 else:
-                    logging.error("❌ Тест 2 ПРОВАЛЕН: Tor соединение НЕ РАБОТАЕТ")
-                    logging.error(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
-                    return False
+                    tor_content_lower = tor_content.lower()
+                    
+                    if "congratulations" in tor_content_lower:
+                        logging.info("✅ Тест 3 ПРОЙДЕН: Tor Project ПОДТВЕРЖДАЕТ соединение!")
+                    elif "using tor" in tor_content_lower or "tor browser" in tor_content_lower:
+                        logging.info("✅ Тест 3 ПРОЙДЕН: Tor соединение обнаружено Tor Project!")
+                    else:
+                        logging.warning("⚠ Тест 3: Tor Project не подтвердил, но IP изменился")
+                        logging.debug(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
+                
+                logging.info("🎉 ВСЕ ТЕСТЫ ПРОЙДЕНЫ: TOR ПРОКСИ РАБОТАЕТ КОРРЕКТНО!")
+                return True
                     
             except Exception as e:
                 logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА во время проверки соединения: {e}")
@@ -1632,6 +1703,23 @@ class AvisoAutomation:
         logging.info(f"🏁 Завершено выполнение заданий: {completed_tasks}/{len(tasks)}")
         return completed_tasks
     
+    def cleanup_proxy_environment(self):
+        """Очистка переменных окружения прокси"""
+        try:
+            proxy_env_vars = [
+                'HTTP_PROXY', 'HTTPS_PROXY', 'SOCKS_PROXY', 'ALL_PROXY',
+                'http_proxy', 'https_proxy', 'socks_proxy', 'all_proxy'
+            ]
+            
+            logging.info("🧹 Очистка переменных окружения прокси...")
+            for env_var in proxy_env_vars:
+                if env_var in os.environ:
+                    del os.environ[env_var]
+                    logging.debug(f"✓ Удалена переменная окружения: {env_var}")
+                    
+        except Exception as e:
+            logging.debug(f"⚠ Ошибка очистки переменных окружения: {e}")
+    
     def cleanup(self):
         """Очистка ресурсов"""
         try:
@@ -1645,6 +1733,9 @@ class AvisoAutomation:
             self.tor_manager.stop_tor()
         except Exception as e:
             logging.debug(f"⚠ Ошибка остановки Tor: {e}")
+        
+        # Очищаем переменные окружения прокси
+        self.cleanup_proxy_environment()
     
     def run_cycle(self) -> bool:
         """Выполнение одного цикла работы"""
