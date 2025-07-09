@@ -1,0 +1,34 @@
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Log files
+*.log
+
+# Cookies and session files
+*.pkl
+
+# Backup files
+*_backup_*.py
+aviso_automation_v*.py
+
+# Tor data directories
+tor_data_*/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
