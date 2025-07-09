@@ -378,36 +378,100 @@ class TorManager:
             logging.debug(f"⚠ Ошибка проверки порта Tor: {e}")
             return False
 
+    def get_real_ip(self) -> Optional[str]:
+        """Получение реального IP адреса устройства (без прокси)"""
+        try:
+            # Получаем IP без прокси
+            response = requests.get('https://api.ipify.org', timeout=10)
+            real_ip = response.text.strip()
+            logging.info(f"🌐 Реальный IP устройства: {real_ip}")
+            return real_ip
+        except Exception as e:
+            logging.error(f"❌ Ошибка получения реального IP: {e}")
+            return None
+
+    def get_tor_ip_via_2ip(self) -> Optional[str]:
+        """Получение IP через Tor с использованием 2ip.ru"""
+        try:
+            # Делаем запрос через Tor прокси
+            response = requests.get(
+                'https://2ip.ru/',
+                proxies={
+                    'http': f'socks5://127.0.0.1:{self.tor_port}',
+                    'https': f'socks5://127.0.0.1:{self.tor_port}'
+                },
+                timeout=15,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+                }
+            )
+            
+            # Парсим HTML для поиска IP в нужном элементе
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Ищем элемент с классом "ip" и id "d_clip_button"
+            ip_element = soup.find('div', {'class': 'ip', 'id': 'd_clip_button'})
+            if ip_element:
+                span = ip_element.find('span')
+                if span:
+                    tor_ip = span.text.strip()
+                    logging.info(f"🔌 IP через Tor (2ip.ru): {tor_ip}")
+                    return tor_ip
+            
+            # Альтернативный поиск IP адреса на странице
+            import re
+            ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+            ip_matches = re.findall(ip_pattern, response.text)
+            if ip_matches:
+                # Берем первый найденный IP
+                tor_ip = ip_matches[0]
+                logging.info(f"🔌 IP через Tor (резервный поиск): {tor_ip}")
+                return tor_ip
+                
+            logging.error("❌ Не удалось найти IP на странице 2ip.ru")
+            return None
+            
+        except Exception as e:
+            logging.error(f"❌ Ошибка получения IP через 2ip.ru: {e}")
+            return None
+
     def is_tor_running(self) -> bool:
-        """Проверка работы Tor"""
+        """Проверка работы Tor с использованием 2ip.ru"""
         # Сначала быстрая проверка порта
         if not self.check_tor_port():
             logging.debug("⚠ Tor порт недоступен")
             return False
         
         try:
-            # Проверяем через простой HTTP запрос с коротким таймаутом
-            response = requests.get(
-                'http://check.torproject.org/api/ip',
-                proxies={
-                    'http': f'socks5://127.0.0.1:{self.tor_port}',
-                    'https': f'socks5://127.0.0.1:{self.tor_port}'
-                },
-                timeout=10
-            )
-            data = response.json()
-            is_tor = data.get('IsTor', False)
-            if is_tor:
-                logging.info("✓ Tor соединение активно")
-            else:
-                logging.debug("⚠ Tor соединение не активно")
-            return is_tor
-        except requests.exceptions.Timeout:
-            logging.debug("⚠ Таймаут проверки Tor, но порт доступен")
+            # Получаем реальный IP устройства
+            real_ip = self.get_real_ip()
+            if not real_ip:
+                logging.warning("⚠ Не удалось получить реальный IP, продолжаем проверку Tor")
+            
+            # Получаем IP через Tor
+            tor_ip = self.get_tor_ip_via_2ip()
+            if not tor_ip:
+                logging.error("❌ Не удалось получить IP через Tor")
+                return False
+            
+            # Сравниваем IP адреса
+            if real_ip and real_ip == tor_ip:
+                logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: IP адрес не изменился!")
+                logging.error(f"   Реальный IP: {real_ip}")
+                logging.error(f"   IP через Tor: {tor_ip}")
+                logging.error("❌ TOR НЕ РАБОТАЕТ! Прекращение работы!")
+                return False
+            
+            logging.info("✅ Tor соединение РАБОТАЕТ - IP адрес изменился!")
+            if real_ip:
+                logging.info(f"   Реальный IP: {real_ip}")
+            logging.info(f"   IP через Tor: {tor_ip}")
             return True
+            
         except Exception as e:
-            logging.debug(f"⚠ Ошибка проверки Tor: {e}")
-            return True
+            logging.error(f"❌ Ошибка проверки Tor: {e}")
+            return False
     
     def find_tor_executable(self) -> Optional[str]:
         """Поиск исполняемого файла Tor"""
@@ -491,10 +555,21 @@ class TorManager:
     
     def start_tor(self) -> bool:
         """Запуск Tor с простой конфигурацией"""
+        # Сначала получаем реальный IP для последующего сравнения
+        real_ip = self.get_real_ip()
+        if real_ip:
+            logging.info(f"🌐 Текущий реальный IP: {real_ip}")
+        else:
+            logging.warning("⚠ Не удалось определить реальный IP, но продолжаем...")
+        
         # Быстрая проверка через порт
         if self.check_tor_port():
             logging.info("✓ Tor уже запущен (порт доступен)")
-            return True
+            # Проверяем работает ли прокси правильно
+            if self.is_tor_running():
+                return True
+            else:
+                logging.warning("⚠ Tor порт открыт, но прокси не работает, перезапускаем...")
         
         logging.info("🔄 Запуск Tor...")
         
@@ -551,12 +626,19 @@ class TorManager:
             
             logging.info(f"📁 Используется директория данных Tor: {tor_data_dir}")
             
-            # ПРОСТАЯ конфигурация Tor без мостов
+            # УЛУЧШЕННАЯ конфигурация Tor для лучшей работы прокси
             tor_config = f"""
 SocksPort {self.tor_port}
 ControlPort {self.control_port}
 DataDirectory {tor_data_dir}
 Log notice stdout
+DNSPort 0
+AutomapHostsOnResolve 1
+VirtualAddrNetworkIPv4 10.0.0.0/10
+VirtualAddrNetworkIPv6 [FC00::]/7
+ExitPolicy reject *:*
+ExitPolicy accept *:80
+ExitPolicy accept *:443
 """
             
             # Записываем конфиг во временную директорию
@@ -623,16 +705,20 @@ Log notice stdout
                 self.log_tor_errors()
                 return False
             
-            # Проверяем интернет соединение
-            logging.info("🌐 Проверка интернет соединения через Tor...")
-            for attempt in range(3):  # 3 попытки
+            # КРИТИЧЕСКИ ВАЖНАЯ проверка: реально ли меняется IP
+            logging.info("🌐 КРИТИЧЕСКАЯ ПРОВЕРКА: действительно ли Tor меняет IP...")
+            for attempt in range(5):  # 5 попыток с небольшими паузами
                 if self.is_tor_running():
-                    logging.info("✅ Tor успешно запущен и проверен")
+                    logging.info("✅ Tor успешно запущен и IP РЕАЛЬНО изменился!")
                     return True
-                time.sleep(5)  # Ждем между попытками
+                    
+                if attempt < 4:
+                    logging.info(f"⏳ Попытка {attempt + 1}/5: ждем стабилизации соединения...")
+                    time.sleep(10)  # Ждем между попытками
             
-            logging.warning("⚠ Tor запущен, но интернет соединение не подтверждено. Продолжаем...")
-            return True  # Все равно возвращаем True, так как порт работает
+            logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Tor запущен, но IP НЕ МЕНЯЕТСЯ!")
+            logging.error("❌ Работа без изменения IP ЗАПРЕЩЕНА!")
+            return False
             
         except Exception as e:
             logging.error(f"✗ Ошибка запуска Tor: {e}")
@@ -756,8 +842,71 @@ class AvisoAutomation:
         except Exception as e:
             logging.error(f"✗ Ошибка создания резервной копии: {e}")
     
+    def verify_tor_ip_with_browser(self) -> bool:
+        """Проверка IP через браузер на сайте 2ip.ru"""
+        logging.info("🔍 Проверка IP через браузер на 2ip.ru...")
+        
+        try:
+            # Получаем реальный IP без прокси перед запуском Tor
+            real_ip = self.tor_manager.get_real_ip() if hasattr(self.tor_manager, 'get_real_ip') else None
+            
+            # Переходим на 2ip.ru
+            self.driver.get("https://2ip.ru/")
+            
+            # Ждем загрузки страницы
+            HumanBehaviorSimulator.random_sleep(5, 8)
+            
+            # Ожидание появления элемента с IP
+            wait = WebDriverWait(self.driver, 30)
+            try:
+                ip_element = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.ip#d_clip_button"))
+                )
+                logging.info("✓ Элемент с IP найден")
+            except TimeoutException:
+                logging.error("❌ Элемент с IP не найден в течение 30 секунд")
+                return False
+            
+            # Получаем IP из элемента
+            try:
+                span = ip_element.find_element(By.TAG_NAME, "span")
+                tor_ip = span.text.strip()
+                logging.info(f"🔌 IP через Tor браузер: {tor_ip}")
+                
+                # Проверяем формат IP
+                import re
+                ip_pattern = r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$'
+                if not re.match(ip_pattern, tor_ip):
+                    logging.error(f"❌ Неверный формат IP: {tor_ip}")
+                    return False
+                
+                # Сравниваем с реальным IP если он известен
+                if real_ip:
+                    if real_ip == tor_ip:
+                        logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: IP НЕ ИЗМЕНИЛСЯ!")
+                        logging.error(f"   Реальный IP: {real_ip}")
+                        logging.error(f"   IP через Tor: {tor_ip}")
+                        logging.error("❌ TOR НЕ РАБОТАЕТ! Продолжение невозможно!")
+                        return False
+                    else:
+                        logging.info("✅ TOR РАБОТАЕТ! IP адрес успешно изменен!")
+                        logging.info(f"   Реальный IP: {real_ip}")
+                        logging.info(f"   IP через Tor: {tor_ip}")
+                        return True
+                else:
+                    logging.info(f"✅ IP через Tor получен: {tor_ip}")
+                    logging.warning("⚠ Реальный IP неизвестен, сравнение невозможно")
+                    return True
+                    
+            except Exception as e:
+                logging.error(f"❌ Ошибка извлечения IP из элемента: {e}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка проверки IP через браузер: {e}")
+            return False
+    
     def setup_driver(self) -> bool:
-        """Настройка и запуск браузера с Tor"""
         logging.info("🌐 Настройка браузера...")
         
         # Запуск Tor ОБЯЗАТЕЛЬНО
@@ -775,10 +924,12 @@ class AvisoAutomation:
             logging.info(f"🔌 Используется Tor прокси: {proxy_string}")
             
             # Создаем дополнительные аргументы Chrome для SOCKS прокси
+            # УБИРАЕМ все аргументы которые могут блокировать переадресацию
             chrome_args = [
                 f"--proxy-server={proxy_string}",  # Явно указываем SOCKS5 прокси
                 "--proxy-bypass-list=<-loopback>",  # Исключаем localhost из прокси
-                "--disable-web-security",
+                "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost",  # DNS через прокси
+                "--disable-web-security",  # Отключаем веб-безопасность для прокси
                 "--disable-features=VizDisplayCompositor",
                 "--allow-running-insecure-content",
                 "--ignore-certificate-errors",
@@ -788,15 +939,23 @@ class AvisoAutomation:
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
                 "--disable-gpu",
-                "--disable-extensions"
+                "--disable-extensions",
+                # УДАЛЯЕМ аргументы которые могут блокировать переадресацию:
+                # --disable-background-networking убран
+                # --disable-background-timer-throttling убран
+                # --disable-backgrounding-occluded-windows убран
+                # ДОБАВЛЯЕМ аргументы для корректной работы с переадресацией:
+                "--disable-default-apps",  # Отключаем приложения по умолчанию
+                "--disable-popup-blocking",  # Отключаем блокировку всплывающих окон
+                "--allow-insecure-localhost",  # Разрешаем небезопасные соединения
+                "--disable-site-isolation-trials"  # Отключаем изоляцию сайтов
             ]
             
             # Для Termux добавляем дополнительные настройки
             if self.tor_manager.is_termux:
                 chrome_args.extend([
                     "--single-process",
-                    "--no-zygote",
-                    "--disable-background-networking"
+                    "--no-zygote"
                 ])
             
             # Инициализация драйвера SeleniumBase БЕЗ встроенного прокси
@@ -809,8 +968,8 @@ class AvisoAutomation:
             )
             
             # Устанавливаем таймауты
-            self.driver.set_page_load_timeout(45)  # Увеличиваем таймаут
-            self.driver.implicitly_wait(15)
+            self.driver.set_page_load_timeout(60)  # Увеличиваем таймаут для Tor
+            self.driver.implicitly_wait(20)
             
             # Дополнительные настройки для скрытия автоматизации
             try:
@@ -818,86 +977,17 @@ class AvisoAutomation:
             except Exception as e:
                 logging.debug(f"⚠ Не удалось скрыть webdriver: {e}")
             
-            # СТРОГАЯ проверка соединения
-            logging.info("🔍 СТРОГАЯ проверка Tor соединения...")
+            # СТРОГАЯ проверка Tor соединения через 2ip.ru
+            logging.info("🔍 СТРОГАЯ проверка Tor соединения через 2ip.ru...")
             
-            try:
-                # Тест 1: Проверяем что страница вообще загружается
-                logging.info("📡 Тест 1: Базовая проверка загрузки...")
-                self.driver.get("https://www.google.com")
-                self.driver.sleep(10)
-                
-                page_content = self.driver.get_page_source()
-                page_title = self.driver.get_title()
-                
-                logging.info(f"📄 Заголовок страницы: {page_title}")
-                logging.info(f"📄 Размер контента: {len(page_content)} символов")
-                
-                # Проверяем что контент действительно загрузился
-                if len(page_content) < 1000:
-                    logging.error("❌ Тест 1 ПРОВАЛЕН: Слишком мало контента (страница не загрузилась)")
-                    logging.error(f"📋 Содержимое: {page_content[:500]}...")
-                    return False
-                
-                if "google" not in page_content.lower():
-                    logging.error("❌ Тест 1 ПРОВАЛЕН: Google контент не найден")
-                    logging.error(f"📋 Содержимое: {page_content[:500]}...")
-                    return False
-                
-                logging.info("✅ Тест 1 ПРОЙДЕН: Базовая загрузка работает")
-                
-                # Тест 2: Проверяем Tor
-                logging.info("📡 Тест 2: Проверка Tor соединения...")
-                self.driver.get("https://check.torproject.org")
-                self.driver.sleep(15)  # Даем больше времени для Tor
-                
-                tor_content = self.driver.get_page_source()
-                tor_title = self.driver.get_title()
-                
-                logging.info(f"📄 Tor заголовок: {tor_title}")
-                logging.info(f"📄 Tor контент размер: {len(tor_content)} символов")
-                
-                if len(tor_content) < 500:
-                    logging.error("❌ Тест 2 ПРОВАЛЕН: Tor страница не загрузилась")
-                    logging.error(f"📋 Tor содержимое: {tor_content[:300]}...")
-                    return False
-                
-                tor_content_lower = tor_content.lower()
-                
-                if "congratulations" in tor_content_lower:
-                    logging.info("✅ Тест 2 ПРОЙДЕН: Tor соединение ПОДТВЕРЖДЕНО!")
-                    return True
-                elif "using tor" in tor_content_lower or "tor browser" in tor_content_lower:
-                    logging.info("✅ Тест 2 ПРОЙДЕН: Tor соединение обнаружено!")
-                    return True
-                elif "tor" in tor_content_lower:
-                    logging.warning("⚠ Тест 2 ЧАСТИЧНО: Tor страница загрузилась, но статус неясен")
-                    logging.debug(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
-                    
-                    # Тест 3: Проверяем IP
-                    logging.info("📡 Тест 3: Проверка IP адреса...")
-                    self.driver.get("https://httpbin.org/ip")
-                    self.driver.sleep(8)
-                    
-                    ip_content = self.driver.get_page_source()
-                    logging.info(f"📍 IP ответ: {ip_content[:200]}...")
-                    
-                    if "origin" in ip_content.lower() and len(ip_content) > 50:
-                        logging.info("✅ Тест 3 ПРОЙДЕН: IP проверка успешна")
-                        return True
-                    else:
-                        logging.error("❌ Тест 3 ПРОВАЛЕН: IP проверка не прошла")
-                        return False
-                else:
-                    logging.error("❌ Тест 2 ПРОВАЛЕН: Tor соединение НЕ РАБОТАЕТ")
-                    logging.error(f"📋 Tor содержимое: {tor_content_lower[:500]}...")
-                    return False
-                    
-            except Exception as e:
-                logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА во время проверки соединения: {e}")
-                logging.error("❌ Tor соединение ТОЧНО НЕ РАБОТАЕТ")
+            if not self.verify_tor_ip_with_browser():
+                logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Tor прокси НЕ РАБОТАЕТ!")
+                logging.error("❌ IP адрес не изменился или проверка не прошла!")
+                logging.error("❌ Продолжение работы НЕВОЗМОЖНО!")
                 return False
             
+            logging.info("✅ Tor проверка УСПЕШНА! Браузер готов к работе!")
+            return True
         except Exception as e:
             logging.error(f"✗ Ошибка настройки браузера: {e}")
             return False
@@ -1003,15 +1093,38 @@ class AvisoAutomation:
             ActionChains(self.driver).move_to_element(login_button).click().perform()
             logging.info("✓ Кнопка входа нажата")
             
-            # Ожидание результата авторизации
+            # Ожидание результата авторизации с возможным переходом на 2FA
             HumanBehaviorSimulator.random_sleep(3, 6)
             
+            # Проверяем текущий URL - возможен переход на страницу 2FA
+            current_url = self.driver.current_url
+            logging.info(f"📍 Текущий URL после входа: {current_url}")
+            
+            # Если произошел переход на страницу 2FA - это НОРМАЛЬНО, не блокируем!
+            if "/2fa" in current_url:
+                logging.info("🔄 Автоматический переход на страницу 2FA обнаружен")
+                logging.info("✅ Переадресация работает корректно!")
+            
             # Проверка на запрос кода подтверждения
-            max_attempts = 3
+            max_attempts = 5  # Увеличиваем количество попыток для 2FA
             for attempt in range(max_attempts):
+                # Проверяем URL еще раз - может быть изменился
+                current_url = self.driver.current_url
+                
+                # Ищем поля кода на любой странице (включая /2fa)
                 code_fields = self.driver.find_elements(By.NAME, "code")
+                
+                # Альтернативные селекторы для поля кода 2FA
+                if not code_fields:
+                    code_fields = self.driver.find_elements(By.CSS_SELECTOR, "input[placeholder*='код']")
+                if not code_fields:
+                    code_fields = self.driver.find_elements(By.CSS_SELECTOR, "input[placeholder*='Код']")
+                if not code_fields:
+                    code_fields = self.driver.find_elements(By.CSS_SELECTOR, "input[type='text'][maxlength='6']")
+                
                 if code_fields:
                     logging.info("🔐 Требуется код подтверждения")
+                    logging.info(f"📍 Код запрашивается на странице: {current_url}")
                     
                     # Автоматический запрос кода у пользователя
                     verification_code = None
@@ -1023,6 +1136,7 @@ class AvisoAutomation:
                             print("\n" + "="*50)
                             print("🔐 ТРЕБУЕТСЯ КОД ПОДТВЕРЖДЕНИЯ")
                             print("📧 Проверьте вашу почту и введите код")
+                            print(f"📍 Страница: {current_url}")
                             print("="*50)
                             
                             verification_code = input("Введите код подтверждения: ").strip()
@@ -1052,18 +1166,42 @@ class AvisoAutomation:
                     HumanBehaviorSimulator.human_like_typing(code_field, verification_code, self.driver)
                     logging.info("✓ Код подтверждения введен")
                     
-                    # Нажатие кнопки входа с кодом
+                    # Поиск кнопки подтверждения (разные варианты)
                     confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, "button.button_theme_blue")
-                    if confirm_buttons:
-                        HumanBehaviorSimulator.random_sleep(1, 2)
-                        ActionChains(self.driver).move_to_element(confirm_buttons[0]).click().perform()
-                        logging.info("✓ Подтверждение с кодом отправлено")
+                    if not confirm_buttons:
+                        confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, "button[type='submit']")
+                    if not confirm_buttons:
+                        confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
+                    if not confirm_buttons:
+                        confirm_buttons = self.driver.find_elements(By.CSS_SELECTOR, "button")
                     
-                    HumanBehaviorSimulator.random_sleep(3, 5)
+                    if confirm_buttons:
+                        # Берем первую подходящую кнопку
+                        button_clicked = False
+                        for button in confirm_buttons:
+                            if button.is_displayed() and button.is_enabled():
+                                HumanBehaviorSimulator.random_sleep(1, 2)
+                                ActionChains(self.driver).move_to_element(button).click().perform()
+                                logging.info("✓ Подтверждение с кодом отправлено")
+                                button_clicked = True
+                                break
+                        
+                        if not button_clicked:
+                            logging.warning("⚠ Кнопка подтверждения не найдена, пробуем Enter")
+                            code_field.send_keys(Keys.ENTER)
+                            logging.info("✓ Отправлено через Enter")
+                    else:
+                        logging.warning("⚠ Кнопка подтверждения не найдена, пробуем Enter")
+                        code_field.send_keys(Keys.ENTER)
+                        logging.info("✓ Отправлено через Enter")
+                    
+                    # Ждем обработки кода и возможного перехода
+                    HumanBehaviorSimulator.random_sleep(5, 8)
                     break
                 else:
                     # Проверяем, может быть уже авторизованы
                     if self.check_authorization():
+                        logging.info("✅ Авторизация завершена успешно!")
                         break
                     
                     # Если это не последняя попытка, ждем еще
