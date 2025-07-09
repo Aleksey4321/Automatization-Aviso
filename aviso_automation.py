@@ -760,15 +760,45 @@ class AvisoAutomation:
         """Получение оригинального IP без прокси"""
         try:
             logging.info("🔍 Проверка оригинального IP (без прокси)...")
-            response = requests.get('https://2ip.ru', timeout=10)
-            if response.status_code == 200:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(response.content, 'html.parser')
-                ip_element = soup.select_one('div.ip span')
-                if ip_element:
-                    original_ip = ip_element.text.strip()
-                    logging.info(f"📍 Оригинальный IP: {original_ip}")
-                    return original_ip
+            
+            # Пробуем несколько сервисов для определения IP
+            ip_services = [
+                'https://2ip.ru',
+                'https://httpbin.org/ip',
+                'https://ipinfo.io/ip',
+                'https://api.ipify.org'
+            ]
+            
+            for service in ip_services:
+                try:
+                    response = requests.get(service, timeout=10)
+                    if response.status_code == 200:
+                        if '2ip.ru' in service:
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(response.content, 'html.parser')
+                            ip_element = soup.select_one('div.ip span')
+                            if ip_element:
+                                original_ip = ip_element.text.strip()
+                                logging.info(f"📍 Оригинальный IP (через {service}): {original_ip}")
+                                return original_ip
+                        elif 'httpbin.org' in service:
+                            import json
+                            data = response.json()
+                            original_ip = data.get('origin', '').split(',')[0].strip()
+                            if original_ip:
+                                logging.info(f"📍 Оригинальный IP (через {service}): {original_ip}")
+                                return original_ip
+                        else:
+                            # Для простых текстовых ответов
+                            original_ip = response.text.strip()
+                            if original_ip and '.' in original_ip:
+                                logging.info(f"📍 Оригинальный IP (через {service}): {original_ip}")
+                                return original_ip
+                except Exception as e:
+                    logging.debug(f"⚠ Сервис {service} недоступен: {e}")
+                    continue
+            
+            logging.error("❌ Не удалось получить IP ни от одного сервиса")
             return None
         except Exception as e:
             logging.error(f"❌ Ошибка получения оригинального IP: {e}")
@@ -783,36 +813,65 @@ class AvisoAutomation:
                 logging.error("❌ Не удалось получить оригинальный IP")
                 return False
             
-            # Проверяем IP через браузер с Tor
+            # Проверяем IP через браузер с Tor (используем несколько сервисов)
             logging.info("🔍 Проверка IP через Tor браузер...")
-            self.driver.get("https://2ip.ru")
             
-            # Ждем загрузки элемента с IP
-            wait = WebDriverWait(self.driver, 20)
-            try:
-                ip_element = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "div.ip span"))
-                )
-                tor_ip = ip_element.text.strip()
-                logging.info(f"📍 IP через Tor: {tor_ip}")
-                
-                # Сравниваем IP адреса
-                if original_ip == tor_ip:
-                    logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: IP НЕ ИЗМЕНИЛСЯ!")
-                    logging.error(f"📍 Оригинальный IP: {original_ip}")
-                    logging.error(f"📍 IP через Tor: {tor_ip}")
-                    logging.error("🛑 Tor прокси НЕ РАБОТАЕТ - останавливаем работу")
-                    return False
-                else:
-                    logging.info(f"✅ IP УСПЕШНО ИЗМЕНЕН!")
-                    logging.info(f"📍 Было: {original_ip}")
-                    logging.info(f"📍 Стало: {tor_ip}")
-                    return True
+            tor_ip = None
+            ip_services = [
+                ('https://2ip.ru', 'div.ip span'),
+                ('https://httpbin.org/ip', 'pre'),
+                ('https://ipinfo.io/ip', 'body'),
+                ('https://api.ipify.org', 'body')
+            ]
+            
+            for service_url, selector in ip_services:
+                try:
+                    self.driver.get(service_url)
+                    wait = WebDriverWait(self.driver, 20)
                     
-            except Exception as e:
-                logging.error(f"❌ Ошибка получения IP через браузер: {e}")
+                    if '2ip.ru' in service_url:
+                        ip_element = wait.until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        tor_ip = ip_element.text.strip()
+                    elif 'httpbin.org' in service_url:
+                        ip_element = wait.until(
+                            EC.presence_of_element_located((By.TAG_NAME, 'pre'))
+                        )
+                        import json
+                        data = json.loads(ip_element.text)
+                        tor_ip = data.get('origin', '').split(',')[0].strip()
+                    else:
+                        ip_element = wait.until(
+                            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+                        )
+                        tor_ip = ip_element.text.strip()
+                    
+                    if tor_ip and '.' in tor_ip:
+                        logging.info(f"📍 IP через Tor (через {service_url}): {tor_ip}")
+                        break
+                        
+                except Exception as e:
+                    logging.debug(f"⚠ Сервис {service_url} недоступен через браузер: {e}")
+                    continue
+            
+            if not tor_ip:
+                logging.error("❌ Не удалось получить IP через браузер ни от одного сервиса")
                 return False
                 
+            # Сравниваем IP адреса
+            if original_ip == tor_ip:
+                logging.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА: IP НЕ ИЗМЕНИЛСЯ!")
+                logging.error(f"📍 Оригинальный IP: {original_ip}")
+                logging.error(f"📍 IP через Tor: {tor_ip}")
+                logging.error("🛑 Tor прокси НЕ РАБОТАЕТ - останавливаем работу")
+                return False
+            else:
+                logging.info(f"✅ IP УСПЕШНО ИЗМЕНЕН!")
+                logging.info(f"📍 Было: {original_ip}")
+                logging.info(f"📍 Стало: {tor_ip}")
+                return True
+                    
         except Exception as e:
             logging.error(f"❌ Ошибка проверки изменения IP: {e}")
             return False
