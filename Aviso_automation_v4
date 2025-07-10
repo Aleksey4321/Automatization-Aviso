@@ -3,9 +3,11 @@
 """
 Aviso YouTube Tasks Automation Script - ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
 ИСПРАВЛЕНИЯ:
-- Убраны ВСЕ мосты Tor - только прямое соединение
-- Упрощена конфигурация Tor
-- Добавлен fallback без Tor если не работает
+- Увеличен таймаут Tor до 20 минут (1200 секунд)
+- Убран fallback режим - работа ТОЛЬКО через Tor (ОБЯЗАТЕЛЬНО)
+- Закрыт ControlPort для безопасности
+- Исправлены ошибки движения мыши с float координатами
+- Добавлена проверка и восстановление Tor соединения
 """
 
 import os
@@ -576,7 +578,7 @@ class HumanBehaviorSimulator:
         HumanBehaviorSimulator.random_sleep(0.5, 1.5)
 
 class SimpleTorManager:
-    """УПРОЩЕННЫЙ класс для управления Tor соединением ТОЛЬКО с прямым подключением"""
+    """УПРОЩЕННЫЙ класс для управления Tor соединением БЕЗ ControlPort (безопасность)"""
     
     def __init__(self):
         self.tor_port = None
@@ -733,6 +735,50 @@ class SimpleTorManager:
             logging.error(f"❌ Ошибка тестирования Tor: {e}")
             return False
 
+    def check_and_restore_tor_connection(self) -> bool:
+        """Проверка и восстановление Tor соединения"""
+        logging.info("🔍 Проверка Tor соединения...")
+        
+        # Проверяем порт Tor
+        if not self.check_tor_port():
+            logging.warning("⚠ Tor порт недоступен, попытка восстановления...")
+            return self.restore_tor_connection()
+        
+        # Проверяем соединение через Tor
+        if not self.test_tor_connection():
+            logging.warning("⚠ Tor соединение не работает, попытка восстановления...")
+            return self.restore_tor_connection()
+        
+        logging.info("✅ Tor соединение работает нормально")
+        return True
+
+    def restore_tor_connection(self) -> bool:
+        """Восстановление Tor соединения"""
+        logging.info("🔄 Восстановление Tor соединения...")
+        
+        try:
+            # Останавливаем существующий Tor
+            if self.tor_process:
+                logging.info("🛑 Остановка текущего Tor процесса...")
+                self.stop_tor()
+            
+            # Очищаем все процессы Tor
+            kill_existing_tor_processes()
+            time.sleep(5)
+            
+            # Перезапускаем Tor
+            logging.info("🚀 Перезапуск Tor...")
+            if self.start_tor():
+                logging.info("✅ Tor соединение восстановлено")
+                return True
+            else:
+                logging.error("❌ Не удалось восстановить Tor соединение")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка восстановления Tor: {e}")
+            return False
+
     def start_tor(self) -> bool:
         """Запуск Tor с ПРОСТОЙ конфигурацией БЕЗ мостов"""
         logging.info("🚀 ЗАПУСК TOR С ПРОСТОЙ КОНФИГУРАЦИЕЙ")
@@ -754,16 +800,15 @@ class SimpleTorManager:
                     logging.error("❌ Tor все еще не найден после установки")
                     return False
             
-            # Находим свободные порты
-            free_ports = find_free_port_range(9050, 2)
-            if len(free_ports) < 2:
-                logging.error("❌ Не удалось найти 2 свободных порта")
+            # Находим свободный порт для SOCKS
+            free_ports = find_free_port_range(9050, 1)
+            if len(free_ports) < 1:
+                logging.error("❌ Не удалось найти свободный порт")
                 return False
             
             self.tor_port = free_ports[0]      # SOCKS порт
-            self.control_port = free_ports[1]  # Control порт
             
-            logging.info(f"🔌 Используем порты: SOCKS={self.tor_port}, Control={self.control_port}")
+            logging.info(f"🔌 Используем порт: SOCKS={self.tor_port}")
             
             # Создаем временную директорию для данных Tor
             import tempfile
@@ -786,9 +831,8 @@ class SimpleTorManager:
             
             logging.info(f"📁 Директория данных Tor: {tor_data_dir}")
             
-            # ПРОСТАЯ конфигурация Tor БЕЗ мостов
+            # ПРОСТАЯ конфигурация Tor БЕЗ мостов и БЕЗ ControlPort для безопасности
             tor_config = f"""SocksPort {self.tor_port}
-ControlPort {self.control_port}
 DataDirectory {tor_data_dir}
 Log notice stdout
 """
@@ -842,7 +886,7 @@ Log notice stdout
             port_ready = False
             bootstrap_complete = False
             
-            for i in range(60):  # 60 попыток по 2 секунды = 2 минуты
+            for i in range(600):  # 600 попыток по 2 секунды = 20 минут
                 time.sleep(2)
                 
                 # Проверяем что процесс еще жив
@@ -876,9 +920,9 @@ Log notice stdout
                     except:
                         pass
                 
-                # Показываем прогресс каждые 20 секунд
-                if i % 10 == 0:  # Каждые 20 секунд
-                    logging.info(f"⏳ Ожидание Tor... ({i*2}/120 секунд)")
+                # Показываем прогресс каждые 60 секунд
+                if i % 30 == 0:  # Каждые 60 секунд
+                    logging.info(f"⏳ Ожидание Tor... ({i*2}/1200 секунд)")
             
             if not port_ready:
                 logging.error("❌ Tor порт не запустился в течение отведенного времени")
@@ -1130,14 +1174,14 @@ class AvisoAutomation:
         logging.info("🔍 Получение внешнего IP адреса без прокси...")
         self.original_ip = self.get_current_ip_without_proxy()
         
-        # Пытаемся запустить Tor
-        logging.info("🔄 Попытка запуска Tor...")
-        if self.tor_manager.start_tor():
-            logging.info("✅ Tor запущен успешно! Используем Tor прокси.")
-            self.use_tor = True
-        else:
-            logging.warning("⚠ Tor не удалось запустить. Работаем БЕЗ прокси.")
-            self.use_tor = False
+        # Пытаемся запустить Tor - ОБЯЗАТЕЛЬНО
+        logging.info("🔄 Запуск Tor (ОБЯЗАТЕЛЬНО)...")
+        if not self.tor_manager.start_tor():
+            logging.error("❌ Tor не удалось запустить. Скрипт не может работать без Tor.")
+            raise Exception("Tor соединение обязательно для работы скрипта")
+        
+        logging.info("✅ Tor запущен успешно! Используем Tor прокси.")
+        self.use_tor = True
         
         try:
             # Получаем User-Agent для Firefox
@@ -1151,24 +1195,19 @@ class AvisoAutomation:
             # Настройка Firefox
             firefox_options = Options()
             
-            if self.use_tor:
-                # Настройки прокси для Firefox с Tor
-                logging.info(f"🔌 Настройка прокси Firefox: SOCKS5 127.0.0.1:{self.tor_manager.tor_port}")
-                firefox_options.set_preference("network.proxy.type", 1)  # Ручная настройка прокси
-                firefox_options.set_preference("network.proxy.socks", "127.0.0.1")
-                firefox_options.set_preference("network.proxy.socks_port", self.tor_manager.tor_port)
-                firefox_options.set_preference("network.proxy.socks_version", 5)
-                firefox_options.set_preference("network.proxy.socks_remote_dns", True)  # DNS через Tor
-                
-                # Отключаем HTTP и HTTPS прокси (используем только SOCKS)
-                firefox_options.set_preference("network.proxy.http", "")
-                firefox_options.set_preference("network.proxy.http_port", 0)
-                firefox_options.set_preference("network.proxy.ssl", "")
-                firefox_options.set_preference("network.proxy.ssl_port", 0)
-            else:
-                logging.info("🌐 Настройка Firefox БЕЗ прокси")
-                # Прямое соединение без прокси
-                firefox_options.set_preference("network.proxy.type", 0)  # Без прокси
+            # Настройки прокси для Firefox с Tor (ОБЯЗАТЕЛЬНО)
+            logging.info(f"🔌 Настройка прокси Firefox: SOCKS5 127.0.0.1:{self.tor_manager.tor_port}")
+            firefox_options.set_preference("network.proxy.type", 1)  # Ручная настройка прокси
+            firefox_options.set_preference("network.proxy.socks", "127.0.0.1")
+            firefox_options.set_preference("network.proxy.socks_port", self.tor_manager.tor_port)
+            firefox_options.set_preference("network.proxy.socks_version", 5)
+            firefox_options.set_preference("network.proxy.socks_remote_dns", True)  # DNS через Tor
+            
+            # Отключаем HTTP и HTTPS прокси (используем только SOCKS)
+            firefox_options.set_preference("network.proxy.http", "")
+            firefox_options.set_preference("network.proxy.http_port", 0)
+            firefox_options.set_preference("network.proxy.ssl", "")
+            firefox_options.set_preference("network.proxy.ssl_port", 0)
             
             # Общие настройки Firefox
             firefox_options.set_preference("general.useragent.override", user_agent)
@@ -1375,8 +1414,8 @@ class AvisoAutomation:
                     continue
                     
                 prev_point = curve_points[i-1]
-                offset_x = point[0] - prev_point[0]
-                offset_y = point[1] - prev_point[1]
+                offset_x = int(point[0] - prev_point[0])  # Приводим к целым числам
+                offset_y = int(point[1] - prev_point[1])  # Приводим к целым числам
                 
                 actions.move_by_offset(offset_x, offset_y)
                 time.sleep(random.uniform(0.01, 0.05))
@@ -1773,8 +1812,8 @@ class AvisoAutomation:
                 
                 for i, point in enumerate(curve_points[1:], 1):  # Пропускаем первую точку
                     prev_point = curve_points[i-1]
-                    offset_x = point[0] - prev_point[0]
-                    offset_y = point[1] - prev_point[1]
+                    offset_x = int(point[0] - prev_point[0])  # Приводим к целым числам
+                    offset_y = int(point[1] - prev_point[1])  # Приводим к целым числам
                     actions.move_by_offset(offset_x, offset_y)
                     time.sleep(random.uniform(0.01, 0.03))
                 
@@ -1915,8 +1954,7 @@ class AvisoAutomation:
             logging.debug(f"⚠ Ошибка закрытия браузера: {e}")
         
         try:
-            if self.use_tor:
-                self.tor_manager.stop_tor()
+            self.tor_manager.stop_tor()
         except Exception as e:
             logging.debug(f"⚠ Ошибка остановки Tor: {e}")
     
@@ -1928,6 +1966,11 @@ class AvisoAutomation:
             # Настройка браузера
             if not self.setup_driver():
                 logging.error("❌ Не удалось настроить браузер")
+                return False
+            
+            # Проверка Tor соединения перед началом работы
+            if not self.tor_manager.check_and_restore_tor_connection():
+                logging.error("❌ Tor соединение недоступно")
                 return False
             
             # Попытка использовать сохраненные cookies
@@ -2022,17 +2065,17 @@ def main():
     print("🚀 Автоматический запуск...")
     print("⚠  ВНИМАНИЕ: Используйте бота ответственно!")
     print("🔧 ФИНАЛЬНЫЕ ИСПРАВЛЕНИЯ:")
-    print("   ✅ УБРАНЫ ВСЕ МОСТЫ TOR - только прямое соединение")
-    print("   ✅ Упрощена конфигурация Tor до минимума")
-    print("   ✅ Fallback режим: работа БЕЗ Tor если не запускается")
+    print("   ✅ УВЕЛИЧЕН ТАЙМАУТ TOR до 20 минут (1200 секунд)")
+    print("   ✅ УБРАН FALLBACK РЕЖИМ - работа ТОЛЬКО через Tor")
+    print("   ✅ ЗАКРЫТ ControlPort для безопасности")
+    print("   ✅ ИСПРАВЛЕНЫ координаты движения мыши (int)")
+    print("   ✅ ДОБАВЛЕНА проверка и восстановление Tor соединения")
     print("   ✅ Полная очистка процессов перед запуском")
-    print("   ✅ Исправлена логика поиска свободных портов")
-    print("   ✅ Детальное логирование конфигурации Tor")
     print("📋 Функции:")
     print("   - Автоматическая авторизация на aviso.bz")
     print("   - Выполнение заданий по просмотру YouTube")
     print("   - Имитация человеческого поведения")
-    print("   - Работа через Tor прокси ИЛИ БЕЗ прокси (fallback)")
+    print("   - Работа ТОЛЬКО через Tor прокси (ОБЯЗАТЕЛЬНО)")
     print("   - Автоматическая установка geckodriver")
     print("   - Фиксированный User-Agent для аккаунта")
     print("   - Улучшенная имитация опечаток при вводе")
